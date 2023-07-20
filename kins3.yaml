@@ -1,0 +1,114 @@
+Resources:
+  MyS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: vmt-kins3-bucket
+
+  MyKinesisStream:
+    Type: 'AWS::Kinesis::Stream'
+    Properties:
+      Name: vmt-kins3-strean
+      ShardCount: 1
+
+  MyIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: vmt-kins3-rol
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - lambda.amazonaws.com
+                - firehose.amazonaws.com  # Permitir que Firehose asuma el rol
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: vmt-kins3-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                Resource: 'arn:aws:s3:::vmt-kins3-bucket/*'
+              - Effect: Allow
+                Action: 'kinesis:PutRecord'
+                Resource: 'arn:aws:kinesis:*:*:stream/vmt-kins3-strean'
+
+  MyLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: vmt-kins3-func
+      Handler: index.handler
+      Role: !GetAtt MyIAMRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import requests
+          import json
+          from datetime import datetime  # Importar la clase datetime
+
+          def handler(event, context):
+              # Paso 1: Hacer una petición GET al endpoint
+              response = requests.get('https://official-joke-api.appspot.com/random_joke')
+              data = response.json()
+
+              # Paso 2: Subir el archivo .json a S3
+              s3 = boto3.client('s3')
+              key = 'joke-{}-{}.json'.format(data['id'], datetime.now().isoformat())  # Usar el ID y la hora actual como parte del nombre de la clave
+              s3.put_object(Bucket='vmt-kins3-bucket', Key=key, Body=json.dumps(data))
+
+              # Paso 3: Leer el archivo desde S3 y enviar los datos a Kinesis
+              kinesis = boto3.client('kinesis')
+              kinesis.put_record(
+                  StreamName='vmt-kins3-strean',
+                  Data=json.dumps(data),
+                  PartitionKey=str(data['id'])  # Usar el ID como la clave de partición
+              )
+      Runtime: python3.8
+
+  MyLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt MyLambdaFunction.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MyScheduledEvent.Arn
+
+  MyScheduledEvent:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: Ejecuta la función Lambda cada minuto
+      ScheduleExpression: 'rate(1 minute)'
+      State: 'ENABLED'
+      Targets:
+        - Arn: !GetAtt MyLambdaFunction.Arn
+          Id: TargetFunction
+
+
+  MyDeliveryStream:
+    Type: 'AWS::KinesisFirehose::DeliveryStream'
+    Properties:
+      DeliveryStreamName: mi-firehose-stream
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt MyS3Bucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 50
+        RoleARN: !GetAtt MyIAMRole.Arn
+
+Outputs:
+  BucketName:
+    Value: !Ref MyS3Bucket
+  StreamName:
+    Value: !Ref MyKinesisStream
+  FunctionName:
+    Value: !Ref MyLambdaFunction
+  IAMRole:
+    Value: !GetAtt MyIAMRole.Arn
+  DeliveryStreamName:
+    Value: !Ref MyDeliveryStream
